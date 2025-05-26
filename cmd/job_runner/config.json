@@ -1,0 +1,25 @@
+{
+  "http_addr": "0.0.0.0",
+  "http_port": 8080,
+  "connection_options": {
+    "max_connections": 10,
+    "max_idle_connections": 5,
+    "max_connection_lifetime": "10m",
+    "connect_timeout": "10s",
+    "query_timeout": "30s",
+    "prepared_statements": true,
+    "no_ping": false,
+    "driver_params": {
+      "postgres": {
+        "sslmode": "disable",
+        "connect_timeout": "5"
+      },
+      "mysql": {
+        "tls": "false",
+        "charset": "utf8mb4"
+      }
+    }
+  },
+  "query_metric_name": "sql_query_result",
+  "query_status_metric_name": "sql_query_status"
+}

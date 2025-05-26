@@ -1,0 +1,33 @@
+services:
+  job-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./cmd/job_runner/config.json:/app/config.json
+    restart: unless-stopped
+    depends_on:
+      - postgres_db # Make job-runner depend on postgres
+    environment: # Optional: Pass DB connection details if your app reads them from env
+      - JOB_RUNNER_DB_HOST=postgres_db
+      - JOB_RUNNER_DB_PORT=5432
+      - JOB_RUNNER_DB_USER=testuser
+      - JOB_RUNNER_DB_PASSWORD=testpassword
+      - JOB_RUNNER_DB_NAME=testdb
+
+  postgres_db:
+    image: postgres:15 # Using a specific version of postgres
+    ports:
+      - "5432:5432" # Expose postgres port to the host (optional, for direct access)
+    environment:
+      POSTGRES_USER: testuser
+      POSTGRES_PASSWORD: testpassword
+      POSTGRES_DB: testdb
+    volumes:
+      - postgres_data:/var/lib/postgresql/data # Persist data
+    restart: unless-stopped
+
+volumes:
+  postgres_data: {} # Define the named volume for data persistence
