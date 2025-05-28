@@ -17,7 +17,7 @@ if ($HttpPort -ne 0) {
 }
 
 Write-Host "Starting Job Runner..." -ForegroundColor Green
-Start-Process -NoNewWindow -FilePath ".\job_runner.exe" -ArgumentList $arguments
+Start-Process -NoNewWindow -FilePath "$PSScriptRoot\job_runner.exe" -ArgumentList $arguments
 
 Write-Host "Server is running at http://localhost:8080" -ForegroundColor Cyan
 Write-Host "Press Ctrl+C to stop the server" -ForegroundColor Yellow

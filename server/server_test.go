@@ -117,10 +117,19 @@ func TestServerIntegration(t *testing.T) {
 			endpoint:     "/metrics",
 			expectedCode: http.StatusOK,
 			expectedParts: []string{
-				`http_requests_total{handler="/health",method="GET",status_code="200"}`,  // From previous health check call
-				`http_requests_total{handler="/",method="GET",status_code="200"}`,        // From previous root page call
-				`http_requests_total{handler="/sql",method="GET",status_code="200"}`,     // From previous successful /sql calls
-				`http_requests_total{handler="/metrics",method="GET",status_code="200"}`, // For this current call
+				// Counts for http_requests_total
+				`http_requests_total{code="200",handler="/health",method="GET"} 1`,
+				`http_requests_total{code="200",handler="/",method="GET"} 1`,
+				`http_requests_total{code="200",handler="/sql",method="GET"} 2`,
+				`http_requests_total{code="500",handler="/sql",method="GET"} 1`,
+				`http_requests_total{code="400",handler="/sql",method="GET"} 2`,
+
+				// Counts for http_request_duration_seconds (histograms)
+				`http_request_duration_seconds_count{code="200",handler="/health",method="GET"} 1`,
+				`http_request_duration_seconds_count{code="200",handler="/",method="GET"} 1`,
+				`http_request_duration_seconds_count{code="200",handler="/sql",method="GET"} 2`,
+				`http_request_duration_seconds_count{code="500",handler="/sql",method="GET"} 1`,
+				`http_request_duration_seconds_count{code="400",handler="/sql",method="GET"} 2`,
 			},
 			isAppMetricsTest: true,
 		},
@@ -224,7 +233,7 @@ func TestServerStress(t *testing.T) {
 		if appBodyErr != nil {
 			t.Fatalf("Failed to read /metrics response body: %v", appBodyErr)
 		}
-		expectedSQLCounter := fmt.Sprintf(`http_requests_total{handler="/sql",method="GET",status_code="200"}`)
+		expectedSQLCounter := `http_requests_total{code="200",handler="/sql",method="GET"}`
 		if !strings.Contains(string(appBody), expectedSQLCounter) {
 			t.Errorf("/metrics response should contain counter %q. Response: %s", expectedSQLCounter, string(appBody))
 		}

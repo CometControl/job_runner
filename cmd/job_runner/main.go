@@ -37,7 +37,7 @@ func main() {
 	}
 
 	// Create and start the server
-	srv := server.New(cfg)
+	srv := server.New(cfg, *configFile) // Pass configFile to server.New
 
 	// Channel to listen for OS signals
 	stopChan := make(chan os.Signal, 1)
