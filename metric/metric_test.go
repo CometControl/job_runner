@@ -105,3 +105,52 @@ func TestMetricGenerationWithDifferentValueColumn(t *testing.T) {
 		}
 	}
 }
+
+func TestMetricGenerationWithSpecialTypes(t *testing.T) {
+	// Setup test database
+	conn, _, cleanup := tests.SetupTestDB(t)
+	defer cleanup()
+
+	// Execute a query
+	ctx := context.Background()
+	rows, err := conn.ExecuteQuery(ctx, "SELECT name, guid_val, decimal_val, value FROM special_types_table")
+	if err != nil {
+		t.Fatalf("Failed to execute query: %v", err)
+	}
+	defer rows.Close()
+
+	// Create a metric generator
+	generator := metric.NewGenerator("special_metric", "value")
+
+	// Generate metrics
+	metricSet := metrics.NewSet()
+	err = generator.GenerateFromRows(metricSet, rows)
+	if err != nil {
+		t.Fatalf("Failed to generate metrics: %v", err)
+	}
+
+	// Write metrics to a buffer and check the output
+	var buf bytes.Buffer
+	metricSet.WritePrometheus(&buf)
+	if err != nil {
+		t.Fatalf("Failed to write metrics: %v", err)
+	}
+
+	output := buf.String()
+	// t.Logf("Generated metrics:\n%s", output) // Optional: Log output for debugging
+
+	// Check that we have the expected metrics
+	expectedMetrics := []string{
+		`special_metric{name="item1",guid_val="f47ac10b-58cc-4372-a567-0e02b2c3d479",decimal_val="123.456"} 1`,
+		`special_metric{name="item2",guid_val="01234567-89ab-cdef-fedc-ba9876543210",decimal_val="7890.12"} 2`,
+	}
+
+	for _, expected := range expectedMetrics {
+		// Normalize whitespace in output and expected for more robust comparison
+		normalizedOutput := strings.Join(strings.Fields(output), " ")
+		normalizedExpected := strings.Join(strings.Fields(expected), " ")
+		if !strings.Contains(normalizedOutput, normalizedExpected) {
+			t.Errorf("Expected metric %q not found in output. Output:\n%s", normalizedExpected, output)
+		}
+	}
+}

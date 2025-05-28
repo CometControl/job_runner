@@ -104,6 +104,10 @@ func createTestData(t *testing.T, db *sql.DB, dbPath string) {
 	if err != nil {
 		t.Fatalf("Failed to drop large_test_table in %s: %v", dbPath, err)
 	}
+	_, err = db.Exec(`DROP TABLE IF EXISTS special_types_table`)
+	if err != nil {
+		t.Fatalf("Failed to drop special_types_table in %s: %v", dbPath, err)
+	}
 
 	// Create a tables table
 	_, err = db.Exec(`
@@ -152,6 +156,33 @@ func createTestData(t *testing.T, db *sql.DB, dbPath string) {
 	`)
 	if err != nil {
 		t.Fatalf("Failed to insert test data into metrics table in %s: %v", dbPath, err)
+	}
+
+	// Create a special_types_table for testing uniqueidentifier and decimal
+	_, err = db.Exec(`
+		CREATE TABLE special_types_table (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT,
+			guid_val BLOB,    -- For uniqueidentifier (16 bytes)
+			decimal_val TEXT, -- For decimal (string representation)
+			value REAL        -- The metric value itself
+		)
+	`)
+	if err != nil {
+		t.Fatalf("Failed to create special_types_table in %s: %v", dbPath, err)
+	}
+
+	// Insert test data into special_types_table
+	// Example UUID: f47ac10b-58cc-4372-a567-0e02b2c3d479
+	// As bytes: []byte{0xf4, 0x7a, 0xc1, 0x0b, 0x58, 0xcc, 0x43, 0x72, 0xa5, 0x67, 0x0e, 0x02, 0xb2, 0xc3, 0xd4, 0x79}
+	_, err = db.Exec(`
+		INSERT INTO special_types_table (name, guid_val, decimal_val, value) VALUES
+		('item1', ?, '123.456', 1.0),
+		('item2', ?, '7890.12', 2.0)
+	`, []byte{0xf4, 0x7a, 0xc1, 0x0b, 0x58, 0xcc, 0x43, 0x72, 0xa5, 0x67, 0x0e, 0x02, 0xb2, 0xc3, 0xd4, 0x79},
+		[]byte{0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10}) // Another 16-byte value
+	if err != nil {
+		t.Fatalf("Failed to insert test data into special_types_table in %s: %v", dbPath, err)
 	}
 }
 

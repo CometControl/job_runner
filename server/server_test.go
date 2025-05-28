@@ -26,7 +26,7 @@ func TestServerIntegration(t *testing.T) {
 	cfg.HTTPPort = 0                      // Use a dynamic port for testing
 	cfg.ConnOptions.PreparedStmts = false // Align with test DB setup
 
-	srv := server.New(cfg)
+	srv := server.New(cfg, "") // Pass empty string for configFile
 	// The server's HandleRequest method can be used as the handler for httptest.NewServer
 	testServer := httptest.NewServer(http.HandlerFunc(srv.HandleRequest))
 	defer testServer.Close()
@@ -179,7 +179,7 @@ func TestServerStress(t *testing.T) {
 	cfg.ConnOptions.ConnectTimeout = config.Duration(10 * time.Second)
 	cfg.ConnOptions.PreparedStmts = false // Align with test DB setup
 
-	srv := server.New(cfg)
+	srv := server.New(cfg, "") // Pass empty string for configFile
 	// The server's HandleRequest method can be used as the handler for httptest.NewServer
 	testServer := httptest.NewServer(http.HandlerFunc(srv.HandleRequest))
 	defer testServer.Close()

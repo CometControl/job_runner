@@ -11,6 +11,7 @@ import (
 	dberrors "job_runner/errors"
 
 	"github.com/VictoriaMetrics/metrics"
+	"github.com/google/uuid" // Added for UUID parsing
 )
 
 // Generator handles the generation of metrics from SQL query results
@@ -128,7 +129,26 @@ func (g *Generator) GenerateFromRows(set *metrics.Set, rows *sql.Rows) error {
 			if i != valueColIndex {
 				val := *(values[i].(*interface{}))
 				if val != nil {
-					labelParts = append(labelParts, fmt.Sprintf("%s=%q", col, fmt.Sprint(val)))
+					var labelValueString string
+					// Check if the value is a 16-byte slice (potential UUID)
+					if bytesVal, ok := val.([]byte); ok {
+						if len(bytesVal) == 16 { // Likely a UUID
+							u, err := uuid.FromBytes(bytesVal)
+							if err == nil {
+								labelValueString = u.String() // Convert to standard UUID string
+							} else {
+								// Log warning and fallback to default sprint if parsing failed
+								slog.Warn("Column value is a 16-byte slice but not a valid UUID", "column", col, "error", err)
+								labelValueString = fmt.Sprint(val) // Fallback to default Sprint
+							}
+						} else { // Likely a DECIMAL or other []byte type
+							labelValueString = string(bytesVal) // Convert to string directly
+						}
+					} else {
+						// Default string conversion for all other types
+						labelValueString = fmt.Sprint(val)
+					}
+					labelParts = append(labelParts, fmt.Sprintf("%s=%q", col, labelValueString))
 				}
 			}
 		}
