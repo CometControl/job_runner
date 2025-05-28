@@ -15,12 +15,11 @@ import (
 	"github.com/xo/dburl"
 
 	// Import SQL drivers
-	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "github.com/lib/pq"
 	_ "github.com/microsoft/go-mssqldb/azuread"
 	_ "github.com/sijms/go-ora/v2"
-	_ "modernc.org/sqlite" // Replaced
+	_ "modernc.org/sqlite"
 )
 
 // Connection represents a database connection and its associated settings
@@ -31,12 +30,13 @@ type Connection struct {
 
 // SafeParse wraps dburl.Parse method to prevent leaking credentials in error messages
 func SafeParse(rawURL string) (*dburl.URL, error) {
-	parsed, err := dburl.Parse(os.ExpandEnv(rawURL))
+	expandedURL := os.ExpandEnv(rawURL)
+	parsed, err := dburl.Parse(expandedURL)
 	if err != nil {
 		if uerr := new(url.Error); errors.As(err, &uerr) {
-			return nil, uerr.Err
+			return nil, fmt.Errorf("invalid DSN (underlying error: %w)", uerr.Err)
 		}
-		return nil, fmt.Errorf("invalid URL")
+		return nil, fmt.Errorf("invalid DSN (dburl.Parse error: %w)", err)
 	}
 	return parsed, nil
 }
@@ -44,25 +44,18 @@ func SafeParse(rawURL string) (*dburl.URL, error) {
 // BuildDSN constructs a data source name (connection string) based on the database type and parameters
 func BuildDSN(dbType, username, password, host, port, database string) (string, error) {
 	switch strings.ToLower(dbType) {
-	case "sqlite", "sqlite3": // Added "sqlite"
-		// For SQLite, the DSN is typically just the file path.
-		// We'll use the 'database' parameter as the file path.
+	case "sqlite", "sqlite3":
 		if database == "" {
 			return "", errors.New("database path cannot be empty for SQLite")
 		}
-		return fmt.Sprintf("sqlite://%s", database), nil // Ensure "sqlite" prefix
+		// Return the plain database path. The Open function will handle prefixing if necessary for dburl.
+		return database, nil
 	case "pg", "postgres", "postgresql":
 		portVal := "5432"
 		if port != "" {
 			portVal = port
 		}
 		return fmt.Sprintf("postgres://%s:%s@%s:%s/%s", username, password, host, portVal, database), nil
-	case "mysql":
-		portVal := "3306"
-		if port != "" {
-			portVal = port
-		}
-		return fmt.Sprintf("mysql://%s:%s@%s:%s/%s", username, password, host, portVal, database), nil
 	case "oracle":
 		portVal := "1521"
 		if port != "" {
@@ -78,14 +71,17 @@ func BuildDSN(dbType, username, password, host, port, database string) (string, 
 	default:
 		// Use dburl to build DSN for other types
 		dsn := fmt.Sprintf("%s://%s:%s@%s:%s/%s", dbType, username, password, host, port, database)
-		u, err := dburl.Parse(dsn)
+		u, err := dburl.Parse(dsn) // dburl.Parse, not SafeParse here, as we construct it carefully
 		if err != nil {
-			return "", fmt.Errorf("failed to parse DSN: %w", err)
+			return "", fmt.Errorf("failed to parse constructed DSN: %w", err)
 		}
-		// Ensure the scheme is set correctly for the driver
-		// For modernc.org/sqlite, the scheme should be "sqlite"
+		// Ensure the scheme is set correctly for the driver if dburl didn't infer it as expected
+		// (though for fully qualified DSNs like above, dburl should get it right)
+		// Example: if dbType was an alias dburl didn't know but it's for sqlite
 		if strings.ToLower(dbType) == "sqlite" || strings.ToLower(dbType) == "sqlite3" {
-			u.Scheme = "sqlite"
+			if u.Scheme != "sqlite" { // Only override if not already correct
+				u.Scheme = "sqlite"
+			}
 		}
 		return u.String(), nil
 	}
@@ -93,57 +89,104 @@ func BuildDSN(dbType, username, password, host, port, database string) (string, 
 
 // Open opens a database connection with the specified parameters
 func Open(ctx context.Context, dsn string, connOpts config.ConnectionOptions) (*Connection, error) {
-	parsedURL, err := SafeParse(dsn)
-	if err != nil {
-		return nil, dberrors.NewDBError(fmt.Sprintf("failed to parse DSN: %v", err))
+	originalDSN := dsn
+	// Check if the DSN is a plain path that might be for SQLite.
+	// dburl.Parse might not recognize plain paths as SQLite without a scheme.
+	if !strings.Contains(dsn, "://") &&
+		(strings.HasSuffix(strings.ToLower(dsn), ".db") ||
+			strings.HasSuffix(strings.ToLower(dsn), ".sqlite") ||
+			strings.HasSuffix(strings.ToLower(dsn), ".sqlite3") ||
+			strings.Contains(dsn, "sqlite") || // less specific, but common in names
+			dsn == ":memory:" || strings.HasSuffix(dsn, ":memory:")) {
+		// Prepend "sqlite://" to help dburl.Parse identify it as SQLite.
+		// For paths like "C:/foo/bar.db", this becomes "sqlite://C:/foo/bar.db"
+		// For ":memory:", this becomes "sqlite://:memory:"
+		dsn = "sqlite://" + dsn
 	}
 
-	// Get current query values
-	queryValues, err := url.ParseQuery(parsedURL.RawQuery)
+	parsedURL, err := SafeParse(dsn) // SafeParse calls os.ExpandEnv then dburl.Parse
 	if err != nil {
-		return nil, dberrors.NewDBError(fmt.Sprintf("failed to parse DSN query parameters: %v", err))
+		return nil, dberrors.NewDBError(fmt.Sprintf("failed to parse DSN '%s' (original DSN was '%s'): %v", dsn, originalDSN, err))
 	}
 
-	// Apply driver-specific parameters from config
-	standardizedDriver := strings.ToLower(parsedURL.Driver)
-	if driverSpecificParams, ok := connOpts.DriverParams[standardizedDriver]; ok {
+	// Get current query values from the parsed DSN
+	queryValues, qErr := url.ParseQuery(parsedURL.RawQuery)
+	if qErr != nil {
+		return nil, dberrors.NewDBError(fmt.Sprintf("failed to parse DSN query parameters from '%s' (in DSN '%s'): %v", parsedURL.RawQuery, dsn, qErr))
+	}
+
+	// Apply driver-specific parameters from config, potentially overriding or adding to existing ones
+	// parsedURL.Driver is typically the scheme (e.g., "sqlite", "postgres").
+	// For SQLite, dburl.Parse might set Driver to "sqlite3".
+	lookupDriver := strings.ToLower(parsedURL.Driver)
+	if lookupDriver == "sqlite3" { // dburl often uses "sqlite3" as Driver for "sqlite" scheme
+		lookupDriver = "sqlite"
+	}
+
+	if driverSpecificParams, ok := connOpts.DriverParams[lookupDriver]; ok {
 		for key, value := range driverSpecificParams {
-			queryValues.Set(key, value)
+			queryValues.Set(key, value) // Add/override parameters
 		}
 	}
 
-	// Update RawQuery and DSN string in parsedURL
+	// Update RawQuery in parsedURL with the merged parameters
 	parsedURL.RawQuery = queryValues.Encode()
-	finalDSN := parsedURL.String()
 
-	driverToUse := parsedURL.Driver
-	if parsedURL.GoDriver != "" {
+	// Determine the driver name for sql.Open
+	driverToUse := parsedURL.Driver // This is the scheme from dburl, e.g., "postgres", "mysql", "sqlite3"
+	if parsedURL.GoDriver != "" {   // GoDriver is specific like "pq", "mysql", "sqlite" (for modernc)
 		driverToUse = parsedURL.GoDriver
 	}
-
-	// Override driver name for sqlite to ensure modernc.org/sqlite is used
-	if driverToUse == "sqlite3" {
+	// Standardize SQLite driver name to "sqlite" for modernc.org/sqlite
+	if driverToUse == "sqlite3" { // If GoDriver wasn't set and Driver was "sqlite3"
 		driverToUse = "sqlite"
 	}
 
-	db, err := sql.Open(driverToUse, finalDSN)
-	if err != nil {
-		return nil, dberrors.NewDBError(fmt.Sprintf("failed to open database connection: %v, DSN: %s", err, finalDSN))
+	var dsnForSqlOpen string
+	if driverToUse == "sqlite" {
+		// For modernc.org/sqlite, the DSN is the path (from parsedURL.Path)
+		// with query parameters appended.
+		// dburl.Parse, when given "sqlite://C:/path/to.db?opt=val", sets:
+		//   Scheme: "sqlite"
+		//   Driver: "sqlite3" (or similar, hence our standardization)
+		//   GoDriver: "sqlite"
+		//   Path: "/C:/path/to.db" (note the leading slash if drive letter present)
+		//   DSN: "C:/path/to.db" (this is what we want for modernc.org/sqlite)
+		// If the original DSN was just ":memory:", after prefixing it becomes "sqlite://:memory:".
+		// dburl.Parse then gives Path=":memory:" and DSN=":memory:".
+
+		// We use parsedURL.DSN as dburl has already processed it into the form the driver expects.
+		// For "sqlite://C:/foo/bar.db", parsedURL.DSN becomes "C:/foo/bar.db".
+		// For "sqlite://:memory:", parsedURL.DSN becomes ":memory:".
+		dsnForSqlOpen = parsedURL.DSN
+
+		if parsedURL.RawQuery != "" {
+			dsnForSqlOpen = dsnForSqlOpen + "?" + parsedURL.RawQuery
+		}
+	} else {
+		// For other drivers, parsedURL.String() reconstructs the full DSN
+		// using the scheme, user/pass, host, path, and the *updated* RawQuery.
+		dsnForSqlOpen = parsedURL.String()
+	}
+
+	db, sqlOpenErr := sql.Open(driverToUse, dsnForSqlOpen)
+	if sqlOpenErr != nil {
+		return nil, dberrors.NewDBError(fmt.Sprintf("failed to open database connection (driver: %s, dsn: '%s'): %v", driverToUse, dsnForSqlOpen, sqlOpenErr))
 	}
 
 	// Configure connection pool
 	db.SetMaxOpenConns(connOpts.MaxConns)
 	db.SetMaxIdleConns(connOpts.MaxIdleConns)
-	db.SetConnMaxLifetime(connOpts.MaxConnLifetime.ToStd()) // Use ToStd()
+	db.SetConnMaxLifetime(connOpts.MaxConnLifetime.ToStd())
 
 	// Test the connection with ping unless disabled
 	if !connOpts.NoPing {
-		pingCtx, pingCancel := context.WithTimeout(ctx, connOpts.ConnectTimeout.ToStd()) // Use ToStd()
+		pingCtx, pingCancel := context.WithTimeout(ctx, connOpts.ConnectTimeout.ToStd())
 		defer pingCancel()
 
-		if err := db.PingContext(pingCtx); err != nil {
-			db.Close()
-			return nil, dberrors.NewDBError(fmt.Sprintf("ping failed: %v", err))
+		if pingErr := db.PingContext(pingCtx); pingErr != nil {
+			db.Close() // Close the connection if ping fails
+			return nil, dberrors.NewDBError(fmt.Sprintf("ping failed (driver: %s, dsn: '%s'): %v", driverToUse, dsnForSqlOpen, pingErr))
 		}
 	}
 

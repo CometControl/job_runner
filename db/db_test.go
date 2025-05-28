@@ -10,7 +10,7 @@ import (
 
 func TestSQLiteConnection(t *testing.T) {
 	// Setup test database
-	conn, cleanup := tests.SetupTestDB(t)
+	conn, _, cleanup := tests.SetupTestDB(t) // Get all 3 return values, path not used here
 	defer cleanup()
 
 	// Test executing a query
@@ -61,17 +61,6 @@ func TestBuildDSN(t *testing.T) {
 			wantErr:  false,
 		},
 		{
-			name:     "MySQL",
-			dbType:   "mysql",
-			username: "user",
-			password: "pass",
-			host:     "localhost",
-			port:     "3306",
-			database: "testdb",
-			expected: "mysql://user:pass@localhost:3306/testdb",
-			wantErr:  false,
-		},
-		{
 			name:     "SQLite",
 			dbType:   "sqlite",
 			username: "",
@@ -79,7 +68,7 @@ func TestBuildDSN(t *testing.T) {
 			host:     "",
 			port:     "",
 			database: "/path/to/db.sqlite",
-			expected: "sqlite:///path/to/db.sqlite",
+			expected: "/path/to/db.sqlite", // Changed: BuildDSN for sqlite now returns the plain path
 			wantErr:  false,
 		},
 		{
@@ -98,12 +87,12 @@ func TestBuildDSN(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dsn, err := db.BuildDSN(tt.dbType, tt.username, tt.password, tt.host, tt.port, tt.database)
-			
+
 			if (err != nil) != tt.wantErr {
 				t.Errorf("BuildDSN() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			
+
 			if !tt.wantErr && dsn != tt.expected {
 				t.Errorf("BuildDSN() = %v, want %v", dsn, tt.expected)
 			}

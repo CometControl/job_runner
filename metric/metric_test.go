@@ -14,7 +14,7 @@ import (
 
 func TestMetricGeneration(t *testing.T) {
 	// Setup test database
-	conn, cleanup := tests.SetupTestDB(t)
+	conn, _, cleanup := tests.SetupTestDB(t) // Get all 3 return values, path not used here
 	defer cleanup()
 
 	// Execute a query
@@ -37,7 +37,7 @@ func TestMetricGeneration(t *testing.T) {
 
 	// Write metrics to a buffer and check the output
 	var buf bytes.Buffer
-	err = generator.WriteMetrics(&buf, metricSet)
+	metricSet.WritePrometheus(&buf)
 	if err != nil {
 		t.Fatalf("Failed to write metrics: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestMetricGeneration(t *testing.T) {
 
 func TestMetricGenerationWithDifferentValueColumn(t *testing.T) {
 	// Setup test database
-	conn, cleanup := tests.SetupTestDB(t)
+	conn, _, cleanup := tests.SetupTestDB(t) // Get all 3 return values, path not used here
 	defer cleanup()
 
 	// Execute a query with a different value column
@@ -84,7 +84,7 @@ func TestMetricGenerationWithDifferentValueColumn(t *testing.T) {
 
 	// Write metrics to a buffer and check the output
 	var buf bytes.Buffer
-	err = generator.WriteMetrics(&buf, metricSet)
+	metricSet.WritePrometheus(&buf)
 	if err != nil {
 		t.Fatalf("Failed to write metrics: %v", err)
 	}

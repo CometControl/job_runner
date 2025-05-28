@@ -162,13 +162,6 @@ func (g *Generator) GenerateFromRows(set *metrics.Set, rows *sql.Rows) error {
 	return nil
 }
 
-// WriteMetrics writes the metric set to the provided writer in Prometheus format
-// This function is deprecated, use metricSet.WritePrometheus(w) instead
-func (g *Generator) WriteMetrics(w io.Writer, set *metrics.Set) error {
-	set.WritePrometheus(w)
-	return nil
-}
-
 // RecordQueryStatus records the status of a query execution.
 // It creates a gauge metric with the given name.
 // If an error occurs, it sets the value to 0 and adds an 'error' label with the error message.
@@ -185,36 +178,6 @@ func RecordQueryStatus(set *metrics.Set, metricName string, query string, err er
 	fullMetricName := metricName + labels
 	gauge := set.GetOrCreateGauge(fullMetricName, nil)
 	gauge.Set(statusValue)
-}
-
-// RecordMetrics records metrics from a SQL query result
-// This function seems to be a duplicate or an alternative way to generate metrics.
-// It might be better to consolidate metric generation logic.
-// For now, it's left as is but marked for review.
-// TODO: Review and consolidate metric generation logic.
-func RecordMetrics(set *metrics.Set, db *sql.DB, metricName, sqlQuery, valueColumn string) error {
-	rows, err := db.Query(sqlQuery)
-	if err != nil {
-		return fmt.Errorf("failed to execute query: %w", err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var v interface{}
-		if err := rows.Scan(&v); err != nil {
-			return fmt.Errorf("failed to scan row: %w", err)
-		}
-
-		// Set the metric value using the helper function
-		if floatVal, ok := convertToFloat64(v); ok {
-			gauge := set.GetOrCreateGauge(metricName, nil) // Corrected: pass nil for the callback
-			gauge.Set(floatVal)
-		} else {
-			// convertToFloat64 already logs a warning
-			slog.Debug("Skipping metric due to conversion failure in RecordMetrics", "metricName", metricName, "originalValue", v)
-		}
-	}
-	return rows.Err()
 }
 
 // WriteMetrics writes the metrics in Prometheus format to the given writer.

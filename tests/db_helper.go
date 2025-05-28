@@ -6,29 +6,42 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
-	"time" // Added import
+	"time"
 
 	"job_runner/config"
 	"job_runner/db"
 )
 
-// TestDBPath is the path where the test SQLite database will be created
-const TestDBPath = "./test_data.db"
+// generateTestDBPath creates a unique path for a test SQLite database
+func generateTestDBPath(t *testing.T) string {
+	tempDir := os.TempDir()
+	// Sanitize the test name to be filesystem-friendly
+	safeTestName := strings.ReplaceAll(t.Name(), "/", "_")
+	safeTestName = strings.ReplaceAll(safeTestName, "\\", "_")
+	safeTestName = strings.ReplaceAll(safeTestName, ":", "_")
+	fileName := fmt.Sprintf("job_runner_test_%s_data.db", safeTestName)
+	return filepath.ToSlash(filepath.Clean(filepath.Join(tempDir, fileName)))
+}
 
 // SetupTestDB creates a SQLite database with test data for testing
-func SetupTestDB(t *testing.T) (*db.Connection, func()) {
-	// Ensure test directory exists
-	dir := filepath.Dir(TestDBPath)
+// It now returns the path to the created database along with the connection and cleanup function.
+func SetupTestDB(t *testing.T) (*db.Connection, string, func()) {
+	currentTestDBPath := generateTestDBPath(t)
+	// Force removal of any existing test database file *before* anything else.
+	if err := os.Remove(currentTestDBPath); err != nil && !os.IsNotExist(err) {
+		t.Logf("Warning: could not remove existing test database %s: %v", currentTestDBPath, err)
+	}
+
+	// Ensure test directory exists (though TempDir should exist)
+	dir := filepath.Dir(currentTestDBPath)
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		err := os.MkdirAll(dir, 0755)
 		if err != nil {
-			t.Fatalf("Failed to create test directory: %v", err)
+			t.Fatalf("Failed to create test directory %s: %v", dir, err)
 		}
 	}
-
-	// Remove any existing test database
-	_ = os.Remove(TestDBPath)
 
 	// Create connection options for testing
 	connOpts := config.ConnectionOptions{
@@ -36,10 +49,12 @@ func SetupTestDB(t *testing.T) (*db.Connection, func()) {
 		MaxIdleConns:    2,
 		MaxConnLifetime: config.Duration(0), // No timeout for tests, ensure type compatibility
 		DriverParams: map[string]map[string]string{
-			"sqlite": { // Assuming the test DB is SQLite and db.go standardizes driver to 'sqlite'
-				// SQLite typically doesn't use SSL, but if it had other params, they'd go here.
-				// For example, if we wanted to ensure a specific journal mode for tests:
-				// "_journal_mode": "WAL", // SQLite params often start with _
+			"sqlite": {
+				"_busy_timeout": "5000", // Wait 5 seconds if the database is locked
+				// WAL can improve concurrency but adds complexity to file handling and cleanup,
+				// especially on Windows where files might be locked more readily.
+				// For simplicity in testing, especially cross-platform, default journal mode is often sufficient.
+				// "_journal_mode": "WAL",
 			},
 		},
 		ConnectTimeout: config.Duration(10 * time.Second), // Ensure type compatibility
@@ -48,31 +63,50 @@ func SetupTestDB(t *testing.T) (*db.Connection, func()) {
 		NoPing:         false,
 	}
 
-	// Create DSN for SQLite
-	dsn := "sqlite://" + TestDBPath
+	dsnForDbOpen := currentTestDBPath // Pass the plain, cleaned, absolute path. db.Open should handle this for SQLite.
 
 	// Open connection to the database
-	conn, err := db.Open(context.Background(), dsn, connOpts)
+	conn, err := db.Open(context.Background(), dsnForDbOpen, connOpts)
 	if err != nil {
-		t.Fatalf("Failed to open test database: %v", err)
+		t.Fatalf("Failed to open test database (%s): %v", dsnForDbOpen, err)
 	}
 
 	// Create test tables and data
-	createTestData(t, conn.DB)
+	createTestData(t, conn.DB, currentTestDBPath) // Pass path for logging
 
-	// Return the connection and a cleanup function
+	// Return the connection, the path, and a cleanup function
 	cleanup := func() {
-		conn.Close()
-		os.Remove(TestDBPath)
+		if conn != nil {
+			conn.Close()
+		}
+		// Attempt to remove the database file again on cleanup.
+		if err := os.Remove(currentTestDBPath); err != nil && !os.IsNotExist(err) {
+			t.Logf("Warning: could not remove test database %s during cleanup: %v", currentTestDBPath, err)
+		}
 	}
 
-	return conn, cleanup
+	return conn, currentTestDBPath, cleanup
 }
 
 // createTestData creates tables and populates them with test data
-func createTestData(t *testing.T, db *sql.DB) {
+func createTestData(t *testing.T, db *sql.DB, dbPath string) {
+	// Drop tables if they exist to ensure a clean state for each test
+	// Using the specific db connection ensures we are acting on the correct database.
+	_, err := db.Exec(`DROP TABLE IF EXISTS tables`)
+	if err != nil {
+		t.Fatalf("Failed to drop tables table in %s: %v", dbPath, err)
+	}
+	_, err = db.Exec(`DROP TABLE IF EXISTS metrics`)
+	if err != nil {
+		t.Fatalf("Failed to drop metrics table in %s: %v", dbPath, err)
+	}
+	_, err = db.Exec(`DROP TABLE IF EXISTS large_test_table`)
+	if err != nil {
+		t.Fatalf("Failed to drop large_test_table in %s: %v", dbPath, err)
+	}
+
 	// Create a tables table
-	_, err := db.Exec(`
+	_, err = db.Exec(`
 		CREATE TABLE tables (
 			name TEXT PRIMARY KEY,
 			rows INTEGER,
@@ -80,7 +114,7 @@ func createTestData(t *testing.T, db *sql.DB) {
 		)
 	`)
 	if err != nil {
-		t.Fatalf("Failed to create tables table: %v", err)
+		t.Fatalf("Failed to create tables table in %s: %v", dbPath, err)
 	}
 
 	// Insert test data
@@ -92,7 +126,7 @@ func createTestData(t *testing.T, db *sql.DB) {
 		('categories', 50, 512)
 	`)
 	if err != nil {
-		t.Fatalf("Failed to insert test data into tables table: %v", err)
+		t.Fatalf("Failed to insert test data into tables table in %s: %v", dbPath, err)
 	}
 
 	// Create a metrics table
@@ -104,7 +138,7 @@ func createTestData(t *testing.T, db *sql.DB) {
 		)
 	`)
 	if err != nil {
-		t.Fatalf("Failed to create metrics table: %v", err)
+		t.Fatalf("Failed to create metrics table in %s: %v", dbPath, err)
 	}
 
 	// Insert test metrics data
@@ -117,12 +151,18 @@ func createTestData(t *testing.T, db *sql.DB) {
 		('network_out', 876.23, strftime('%s','now'))
 	`)
 	if err != nil {
-		t.Fatalf("Failed to insert test data into metrics table: %v", err)
+		t.Fatalf("Failed to insert test data into metrics table in %s: %v", dbPath, err)
 	}
 }
 
 // CreateLargeTable creates a table with a large number of rows for stress testing.
 func CreateLargeTable(t *testing.T, db *sql.DB, tableName string, rowCount int) {
+	// Drop table if it exists to ensure a clean state
+	_, err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", tableName))
+	if err != nil {
+		t.Fatalf("Failed to drop large table %s: %v", tableName, err)
+	}
+
 	tx, err := db.Begin()
 	if err != nil {
 		t.Fatalf("Failed to begin transaction: %v", err)

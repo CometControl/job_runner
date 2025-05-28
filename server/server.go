@@ -241,7 +241,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 			</tr>
 			<tr>
 				<td>type</td>
-				<td>Database type (e.g., pg, mysql, sqlite, oracle, sqlserver)</td>
+				<td>Database type (e.g., pg, sqlite, oracle, sqlserver)</td>
 				<td>Yes</td>
 			</tr>
 			<tr>
