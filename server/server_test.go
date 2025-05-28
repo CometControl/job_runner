@@ -109,7 +109,7 @@ func TestServerIntegration(t *testing.T) {
 			query:        "type=sqlite",
 			expectedCode: http.StatusBadRequest,
 			expectedParts: []string{
-				"Missing required parameter", // This error message comes from the handler
+				"Task execution failed: missing required parameter: query", // Updated expected error message
 			},
 		},
 		{

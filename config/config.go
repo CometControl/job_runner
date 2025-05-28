@@ -48,6 +48,7 @@ type Config struct {
 	ConnOptions           ConnectionOptions `json:"connection_options"`
 	QueryMetricName       string            `json:"query_metric_name"`
 	QueryStatusMetricName string            `json:"query_status_metric_name"`
+	HTTPCheckTaskTimeout  Duration          `json:"http_check_task_timeout,omitempty"` // Added for HTTP check tasks
 }
 
 // ConnectionOptions defines database connection parameters
@@ -78,6 +79,7 @@ func DefaultConfig() Config {
 		},
 		QueryMetricName:       "sql_query_result",
 		QueryStatusMetricName: "sql_query_status",
+		HTTPCheckTaskTimeout:  Duration(15 * time.Second), // Default timeout for HTTP checks
 	}
 
 	return config

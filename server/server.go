@@ -8,40 +8,60 @@ import (
 	"time" // Added for http server timeouts
 
 	"job_runner/config"
-	"job_runner/db"
-	"job_runner/metric"
+	// "job_runner/db" // No longer directly used by server, but by sql_handler
+	// "job_runner/metric" // No longer directly used by server, but by sql_handler
+	"job_runner/tasks"
+	"job_runner/tasks/httpcheck" // Import the new httpcheck handler
+	"job_runner/tasks/sql"     // Import the new sql handler package
 
 	"github.com/VictoriaMetrics/metrics"
 )
 
 // Server represents the HTTP server that handles metric requests
 type Server struct {
-	Config config.Config
-	server *http.Server
+	Config       config.Config
+	server       *http.Server
+	taskHandlers map[string]tasks.TaskHandler // Map routes to task handlers
 }
 
 // New creates a new server instance
 func New(cfg config.Config) *Server {
-	return &Server{
-		Config: cfg,
+	s := &Server{
+		Config:       cfg,
+		taskHandlers: make(map[string]tasks.TaskHandler),
 	}
+
+	// Initialize task handlers
+	s.taskHandlers["/sql"] = sql.NewSQLTaskHandler()
+	s.taskHandlers["/http_check"] = httpcheck.NewHTTPCheckTaskHandler() // Add new handler
+
+	return s
 }
 
 // Start starts the HTTP server
 func (s *Server) Start() error {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/sql", s.handleSQLQuery)       // Changed from /metrics
-	mux.HandleFunc("/metrics", s.handleAppMetrics) // New application metrics endpoint
+	// Register task handlers from the map
+	for path, handler := range s.taskHandlers {
+		// Capture path and handler for the closure
+		p := path
+		h := handler
+		mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
+			s.genericTaskDispatcher(w, r, h)
+		})
+	}
+
+	mux.HandleFunc("/metrics", s.handleAppMetrics) // Application metrics endpoint
 	mux.HandleFunc("/health", s.handleHealth)
-	mux.HandleFunc("/", s.handleRoot)
+	mux.HandleFunc("/", s.handleRoot) // Keep the root handler for now
 
 	addr := fmt.Sprintf("%s:%d", s.Config.HTTPAddr, s.Config.HTTPPort)
 	s.server = &http.Server{
 		Addr:         addr,
 		Handler:      mux,
-		ReadTimeout:  s.Config.ConnOptions.ConnectTimeout.ToStd(), // Use ToStd()
-		WriteTimeout: s.Config.ConnOptions.QueryTimeout.ToStd(),   // Use ToStd()
+		ReadTimeout:  s.Config.ConnOptions.ConnectTimeout.ToStd(),
+		WriteTimeout: s.Config.ConnOptions.QueryTimeout.ToStd(), // This might be better named as general request timeout
 		IdleTimeout:  60 * time.Second,
 	}
 
@@ -49,21 +69,50 @@ func (s *Server) Start() error {
 	return s.server.ListenAndServe()
 }
 
-// HandleRequest handles an HTTP request - useful for testing
-func (s *Server) HandleRequest(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Path
+// genericTaskDispatcher handles requests by calling the appropriate TaskHandler.
+func (s *Server) genericTaskDispatcher(w http.ResponseWriter, r *http.Request, handler tasks.TaskHandler) {
+	metricContent, statusCode, err := handler.Handle(r.Context(), r, s.Config)
 
-	switch {
-	case path == "/sql": // Changed from /metrics
-		s.handleSQLQuery(w, r)
-	case path == "/metrics": // New application metrics endpoint
+	s.incrementRequestCounter(r.URL.Path, r.Method, statusCode)
+
+	if err != nil {
+		slog.Error("Task handler error", "path", r.URL.Path, "method", r.Method, "status_code", statusCode, "error", err.Error())
+		// If metricContent is available (e.g., a status metric from the handler), write it with the error status.
+		if len(metricContent) > 0 {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(statusCode) // Handler determined this status code
+			w.Write(metricContent)
+		} else {
+			// Otherwise, just write the error message with the status code.
+			http.Error(w, fmt.Sprintf("Task execution failed: %v", err), statusCode)
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(statusCode)
+	w.Write(metricContent)
+}
+
+// HandleRequest handles an HTTP request - useful for testing
+// This needs to be updated to use the new dispatcher logic or be re-evaluated if still needed.
+func (s *Server) HandleRequest(w http.ResponseWriter, r *http.Request) {
+	// Check if the path is for a registered task handler
+	if handler, ok := s.taskHandlers[r.URL.Path]; ok {
+		s.genericTaskDispatcher(w, r, handler)
+		return
+	}
+
+	// Handle other fixed paths
+	switch r.URL.Path {
+	case "/metrics":
 		s.handleAppMetrics(w, r)
-	case path == "/health":
+	case "/health":
 		s.handleHealth(w, r)
-	case path == "/":
+	case "/":
 		s.handleRoot(w, r)
 	default:
-		s.incrementRequestCounter(path, r.Method, http.StatusNotFound)
+		s.incrementRequestCounter(r.URL.Path, r.Method, http.StatusNotFound)
 		http.NotFound(w, r)
 	}
 }
@@ -78,114 +127,6 @@ func (s *Server) Stop(ctx context.Context) error {
 
 func (s *Server) incrementRequestCounter(handlerPath, method string, statusCode int) {
 	metrics.GetOrCreateCounter(fmt.Sprintf(`http_requests_total{handler="%s",method="%s",status_code="%d"}`, handlerPath, method, statusCode)).Inc()
-}
-
-// handleSQLQuery processes HTTP requests with SQL query parameters
-// Renamed from handleMetrics
-func (s *Server) handleSQLQuery(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		s.incrementRequestCounter("/sql", r.Method, http.StatusMethodNotAllowed)
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	queryParams := r.URL.Query()
-	sqlQuery := queryParams.Get("query")
-	if sqlQuery == "" {
-		s.incrementRequestCounter("/sql", r.Method, http.StatusBadRequest)
-		http.Error(w, "Missing required parameter: query", http.StatusBadRequest)
-		return
-	}
-
-	dbType := queryParams.Get("type")
-	if dbType == "" {
-		s.incrementRequestCounter("/sql", r.Method, http.StatusBadRequest)
-		http.Error(w, "Missing required parameter: type", http.StatusBadRequest)
-		return
-	}
-
-	username := queryParams.Get("username")
-	password := queryParams.Get("password")
-	host := queryParams.Get("host")
-	database := queryParams.Get("db")
-
-	if dbType != "sqlite" && dbType != "sqlite3" && (username == "" || host == "" || database == "") {
-		// Password can be empty for some DBs, but username, host, and db are generally needed.
-		// SQLite only needs 'db' (the file path).
-		s.incrementRequestCounter("/sql", r.Method, http.StatusBadRequest)
-		http.Error(w, "Missing required connection parameters (username, host, db) for non-SQLite types", http.StatusBadRequest)
-		return
-	}
-	if (dbType == "sqlite" || dbType == "sqlite3") && database == "" {
-		s.incrementRequestCounter("/sql", r.Method, http.StatusBadRequest)
-		http.Error(w, "Missing required parameter: db (database file path for SQLite)", http.StatusBadRequest)
-		return
-	}
-
-	port := queryParams.Get("port")
-	valueColumn := queryParams.Get("value_column")
-	if valueColumn == "" {
-		valueColumn = "value"
-	}
-
-	metricPrefix := queryParams.Get("metric_prefix")
-	if metricPrefix == "" {
-		metricPrefix = s.Config.QueryMetricName
-	}
-	queryStatusMetricName := s.Config.QueryStatusMetricName
-
-	requestScopedMetricSet := metrics.NewSet() // Per-request set for SQL results + status
-
-	dsn, err := db.BuildDSN(dbType, username, password, host, port, database)
-	if err != nil {
-		metric.RecordQueryStatus(requestScopedMetricSet, queryStatusMetricName, sqlQuery, err)
-		s.incrementRequestCounter("/sql", r.Method, http.StatusBadRequest)
-		http.Error(w, fmt.Sprintf("Failed to build DSN: %v", err), http.StatusBadRequest)
-		w.Header().Set("Content-Type", "text/plain")
-		requestScopedMetricSet.WritePrometheus(w)
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), s.Config.ConnOptions.QueryTimeout.ToStd()) // Use ToStd()
-	defer cancel()
-
-	conn, err := db.Open(ctx, dsn, s.Config.ConnOptions)
-	if err != nil {
-		metric.RecordQueryStatus(requestScopedMetricSet, queryStatusMetricName, sqlQuery, err)
-		s.incrementRequestCounter("/sql", r.Method, http.StatusInternalServerError)
-		http.Error(w, fmt.Sprintf("Failed to connect to database: %v", err), http.StatusInternalServerError)
-		w.Header().Set("Content-Type", "text/plain")
-		requestScopedMetricSet.WritePrometheus(w)
-		return
-	}
-	defer conn.Close()
-
-	rows, err := conn.ExecuteQuery(ctx, sqlQuery)
-	if err != nil {
-		metric.RecordQueryStatus(requestScopedMetricSet, queryStatusMetricName, sqlQuery, err)
-		s.incrementRequestCounter("/sql", r.Method, http.StatusInternalServerError)
-		http.Error(w, fmt.Sprintf("Failed to execute query: %v", err), http.StatusInternalServerError)
-		w.Header().Set("Content-Type", "text/plain")
-		requestScopedMetricSet.WritePrometheus(w)
-		return
-	}
-	defer rows.Close()
-
-	generator := metric.NewGenerator(metricPrefix, valueColumn)
-	err = generator.GenerateFromRows(requestScopedMetricSet, rows)
-	if err != nil {
-		metric.RecordQueryStatus(requestScopedMetricSet, queryStatusMetricName, sqlQuery, err)
-		s.incrementRequestCounter("/sql", r.Method, http.StatusInternalServerError)
-		http.Error(w, fmt.Sprintf("Failed to generate metrics: %v", err), http.StatusInternalServerError)
-		w.Header().Set("Content-Type", "text/plain")
-		requestScopedMetricSet.WritePrometheus(w)
-		return
-	}
-
-	metric.RecordQueryStatus(requestScopedMetricSet, queryStatusMetricName, sqlQuery, nil)
-	s.incrementRequestCounter("/sql", r.Method, http.StatusOK)
-	w.Header().Set("Content-Type", "text/plain")
-	requestScopedMetricSet.WritePrometheus(w)
 }
 
 // handleAppMetrics serves application-level metrics (e.g., request counters)
@@ -218,15 +159,17 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		<title>Job Runner</title>
 		<style>
 			body { font-family: Arial, sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 20px; }
-			h1 { color: #333; }
+			h1, h2 { color: #333; }
 			code { background-color: #f4f4f4; padding: 2px 5px; border-radius: 3px; }
-			table { border-collapse: collapse; width: 100%%; }
+			table { border-collapse: collapse; width: 100%%; margin-bottom: 20px; }
 			th, td { text-align: left; padding: 8px; border-bottom: 1px solid #ddd; }
 			th { background-color: #f2f2f2; }
 		</style>
 	</head>
 	<body>
 		<h1>Job Runner</h1>
+		
+		<h2>/sql Endpoint</h2>
 		<p>Use the /sql endpoint with the following query parameters to execute SQL queries and get results as Prometheus metrics:</p>
 		<table>
 			<tr>
@@ -280,9 +223,40 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 				<td>No (default: "sql_query_result" from config)</td>
 			</tr>
 		</table>
-		
-		<h2>Example for /sql</h2>
+		<h3>Example for /sql</h3>
 		<code>/sql?type=pg&username=user&password=pass&host=localhost&db=postgres&query=SELECT+name,+value+FROM+metrics&value_column=value</code>
+
+		<h2>/http_check Endpoint</h2>
+		<p>Use the /http_check endpoint to perform an HTTP request to a target URL and get its status and duration as Prometheus metrics.</p>
+		<table>
+			<tr>
+				<th>Parameter</th>
+				<th>Description</th>
+				<th>Required</th>
+			</tr>
+			<tr>
+				<td>target_url</td>
+				<td>The full URL to check (e.g., http://example.com/health)</td>
+				<td>Yes</td>
+			</tr>
+			<tr>
+				<td>method</td>
+				<td>HTTP method to use (e.g., GET, POST)</td>
+				<td>No (default: GET)</td>
+			</tr>
+			<tr>
+				<td>expected_status</td>
+				<td>The expected HTTP status code for a successful check</td>
+				<td>No (default: 200)</td>
+			</tr>
+			<tr>
+				<td>timeout</td>
+				<td>Timeout for the HTTP request (e.g., 5s, 500ms). Overrides global config.</td>
+				<td>No (default: from config, typically 15s)</td>
+			</tr>
+		</table>
+		<h3>Example for /http_check</h3>
+		<code>/http_check?target_url=https://api.example.com/status&method=GET&expected_status=200&timeout=5s</code>
 		
 		<h2>Other Endpoints</h2>
 		<ul>
